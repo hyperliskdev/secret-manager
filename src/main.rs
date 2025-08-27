@@ -45,7 +45,7 @@ pub struct App {
     pub displayName: String,
     pub passwordCredentials: Vec<PasswordCredential>,
     #[serde(skip)]
-    pub owners: Vec<Owner>,
+    pub owners: Vec<Owner>, 
 }
 
 
