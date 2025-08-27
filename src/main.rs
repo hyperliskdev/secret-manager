@@ -7,29 +7,47 @@ use serde::Deserialize;
 
 #[derive(Deserialize, Debug)] 
 pub struct PasswordCredential {
-    pub custom_id: String,
-    pub display_name: String,
-    pub end_date_time: DateTime<chrono::Utc>,
-    pub key_id: String,
+    pub customKeyIdentifier: String,
+    pub displayName: String,
+    pub endDateTime: DateTime<chrono::Utc>,
     pub hint: String,
+    pub keyId: String,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct Owners {
+    pub value: Vec<Owner>,
 }
 
 #[derive(Deserialize, Debug)]
 pub struct Owner {
+    #[serde(rename = "@odata.type")]
+    pub odata_type: String,
+
     pub id: String,
-    pub display_name: Option<String>,
-    pub user_principal_name: Option<String>,
+
+    // These may not always be present, so we use Option<>
+    pub displayName: Option<String>,
+    pub givenName: Option<String>,
+    pub jobTitle: Option<String>,
     pub mail: Option<String>,
+    pub mobilePhone: Option<String>,
+    pub officeLocation: Option<String>,
+    pub preferredLanguage: Option<String>,
+    pub surname: Option<String>,
+    pub userPrincipalName: Option<String>,
 }
 
 #[derive(Deserialize, Debug)] 
 pub struct App {
-    pub object_id: String,
-    pub app_id: String,
-    pub display_name: String,
+    pub id: String,
+    pub appId: String,
+    pub displayName: String,
+    pub passwordCredentials: Vec<PasswordCredential>,
+    #[serde(skip)]
     pub owners: Vec<Owner>,
-    pub password_credentials: Vec<PasswordCredential>,
 }
+
 
 
 impl App {
@@ -53,7 +71,6 @@ async fn main() -> anyhow::Result<()> {
 
     // Get list of application IDs from .env
     // Separated by commas in the "APPLICATION" var
-
     let ids: Vec<String> = std::env::var("APPLICATION")
         .unwrap_or_default()
         .split(',')
@@ -68,20 +85,24 @@ async fn main() -> anyhow::Result<()> {
     
     let mut apps: Vec<App> = Vec::new();
 
+    // Loop through each application ID and get details
     for id in ids {
         let application_response = client.application(&id).get_application().select(&["id", "appId", "displayName", "passwordCredentials"]).send().await?;
         
+        // Check the application response
         info!("APPLICATION RESPONSE: {:#?}", application_response);
         
         let owner_response = client.application(&id).owners().list_owners().send().await?;
 
+        // Check the owner response
         info!("OWNERS RESPONSE: {:#?}", owner_response);
 
-        let owners: Vec<Owner> = owner_response.json().await?;
+        // Deserialize the JSON responses into our structs
+        let owners: Owners = owner_response.json().await?;
         let mut app: App = application_response.json().await?;
 
-        app.insert_owners(owners);
-
+        // Insert owners into the app struct
+        app.insert_owners(owners.value);
         apps.push(app);
     }
 
