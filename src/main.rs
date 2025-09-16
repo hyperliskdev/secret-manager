@@ -1,62 +1,158 @@
-use chrono::DateTime;
 use dotenv::dotenv;
-use graph_rs_sdk::{identity::EnvironmentCredential, *};
+use graph_rs_sdk::{http::HttpResponseExt, identity::{ConfidentialClientApplication, EnvironmentCredential}, *};
 use log::info;
-use serde::Deserialize;
+mod models;
+use crate::models::{App, Owners};
+use reqwest::header::HeaderName;
+use reqwest::header::HeaderValue;
 
 
-#[derive(Deserialize, Debug)] 
-pub struct PasswordCredential {
-    pub customKeyIdentifier: String,
-    pub displayName: String,
-    pub endDateTime: DateTime<chrono::Utc>,
-    pub hint: String,
-    pub keyId: String,
-}
+pub async fn get_applications_with_owners(client: &GraphClient, ids: Vec<String>) -> anyhow::Result<Vec<App>> {
+    let mut apps: Vec<App> = Vec::new();
+    for id in ids {
+        let application_response = client.application(&id).get_application().select(&["id", "appId", "displayName", "passwordCredentials"]).send().await?;
 
-#[derive(Deserialize, Debug)]
-pub struct Owners {
-    pub value: Vec<Owner>,
-}
+        let mut application: App = application_response.json().await?;
 
-#[derive(Deserialize, Debug)]
-pub struct Owner {
-    #[serde(rename = "@odata.type")]
-    pub odata_type: String,
+        let owners_response = client.application(&id).owners().list_owners().select(&["id", "displayName", "mail", "userPrincipalName"]).send().await?;
 
-    pub id: String,
+        let mut owners: Owners = owners_response.json().await?;
 
-    // These may not always be present, so we use Option<>
-    pub displayName: Option<String>,
-    pub givenName: Option<String>,
-    pub jobTitle: Option<String>,
-    pub mail: Option<String>,
-    pub mobilePhone: Option<String>,
-    pub officeLocation: Option<String>,
-    pub preferredLanguage: Option<String>,
-    pub surname: Option<String>,
-    pub userPrincipalName: Option<String>,
-}
-
-#[derive(Deserialize, Debug)] 
-pub struct App {
-    pub id: String,
-    pub appId: String,
-    pub displayName: String,
-    pub passwordCredentials: Vec<PasswordCredential>,
-    #[serde(skip)]
-    pub owners: Vec<Owner>, 
-}
-
-
-
-impl App {
-    pub fn insert_owners(&mut self, owners: Vec<Owner>) {
-        self.owners = owners;
+        application.insert_owners(owners.value);
+        apps.push(application);
     }
+
+    Ok(apps)
 }
 
+// DO NOT USE AT ALL.
+pub async fn get_all_applications_with_owners(client: &GraphClient) -> anyhow::Result<Vec<App>> {
 
+    let mut apps: Vec<App> = Vec::new();
+
+    let all_applications_response = client.applications().list_application().select(&["id", "appId", "displayName", "passwordCredentials"]).send().await?;
+
+    info!("Fetched all applications");
+
+    for application in all_applications_response.json::<serde_json::Value>().await?["value"].as_array().unwrap() {
+        let mut app: App = match serde_json::from_value(application.clone()) {
+            Ok(a) => a,
+            Err(e) => {
+                info!("Failed to parse application: {}. Skipping.", e);
+                continue;
+            }
+        };
+
+        let owners_response = client.application(&app.id).owners().list_owners().select(&["id", "displayName", "mail", "userPrincipalName"]).send().await?;
+
+        // If reading json fails, skip this application.
+        let owners: Owners = match owners_response.json::<Owners>().await {
+            Ok(o) => {
+                o
+            },
+            Err(_) => {
+                info!("Failed to parse owners for application '{:?}'. Skipping.", app.displayName);
+                continue;
+            }
+        };
+
+        app.insert_owners(owners.value);
+        apps.push(app);
+    }
+
+    info!("Found {} applications with owners", apps.len());
+
+    Ok(apps)
+
+}
+
+pub async fn get_all_applications_with_filter(client: &GraphClient) -> anyhow::Result<Vec<App>> {
+    let mut apps: Vec<App> = Vec::new();
+
+    // filter for application with passwordCredentials and owners.
+    // ConsistencyLevel header must be set to "eventual" when using $count in filter.
+    let all_applications_response = client.applications().list_application()
+        .header(HeaderName::from_static("consistencylevel"), HeaderValue::from_static("eventual"))
+        .filter(&["owners/$count ne 0"])
+        .select(&["id", "appId", "displayName", "passwordCredentials"])
+        .count("true")
+        .paging()
+        .json::<serde_json::Value>()
+        .await?;
+
+    // all_application_response is a VecDeque of pages.
+    for page in all_applications_response {
+
+        for application_response in page.json() {
+            
+            for application in application_response["value"].as_array().unwrap() {
+                let mut app: App = match serde_json::from_value(application.clone()) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        info!("Failed to parse application: {}. Skipping.", e);
+                        continue;
+                    }
+                };
+
+                let owners_response = client.application(&app.id).owners().list_owners().select(&["id", "displayName", "mail", "userPrincipalName"]).send().await?;
+
+                // If reading json fails, skip this application.
+                let owners: Owners = match owners_response.json::<Owners>().await {
+                    Ok(o) => {
+                        o
+                    },
+                    Err(_) => {
+                        info!("Failed to parse owners for application '{:?}'. Skipping.", app.displayName);
+                        continue;
+                    }
+                };
+
+                app.insert_owners(owners.value);
+                apps.push(app);
+            }
+        }
+    }
+
+    info!("Fetched filtered applications");
+
+    Ok(apps)
+}
+
+// Put the owners mail or userPrincipalName in a vec and return it
+pub fn check_expiring_credentials(apps: &Vec<App>) -> anyhow::Result<()> {
+    let now = chrono::Utc::now();
+    let threshold = now + chrono::Duration::days(30);
+
+    // App Name, Vec<Owner Emails>
+    let mut app_owners: Vec<(String, Vec<String>)> = Vec::new();
+
+    for app in apps {
+        if app.passwordCredentials.is_empty() {
+            info!("Application '{:?}' (App ID: {:?}) has no password credentials.", app.displayName, app.appId);
+            continue;
+        }
+        for credential in &app.passwordCredentials {
+            if credential.endDateTime < threshold {
+                info!("Application '{:?}' (App ID: {:?}) has a credential expiring on {} (Key ID: {:?}, Hint: {:?})", app.displayName, app.appId, credential.endDateTime, credential.keyId, credential.hint);
+                if !app.owners.is_empty() {
+                    info!("  Owners:");
+                    for owner in &app.owners {
+                        if let Some(user_principal_name) = &owner.userPrincipalName {
+                            info!("    - {} ({})", owner.displayName.as_deref().unwrap_or("No Name"), user_principal_name);
+                        } else if let Some(mail) = &owner.mail {
+                            info!("    - {} ({})", owner.displayName.as_deref().unwrap_or("No Name"), mail);
+                        } else {
+                            info!("    - {} (No contact info)", owner.displayName.as_deref().unwrap_or("No Name"));
+                        }
+                    }
+                } else {
+                    info!("  No owners found for this application.");
+                }
+            }
+        }
+    }
+    Ok(())
+}
 
 pub fn client_secret_credential() -> anyhow::Result<GraphClient> {
     let confidential_client = EnvironmentCredential::client_secret_credential()?;
@@ -67,44 +163,17 @@ pub fn client_secret_credential() -> anyhow::Result<GraphClient> {
 async fn main() -> anyhow::Result<()> {
     dotenv().ok();
 
+    // setup logging
+    colog::init();
+
     let client = client_secret_credential()?;
 
-    // Get list of application IDs from .env
-    // Separated by commas in the "APPLICATION" var
-    let ids: Vec<String> = std::env::var("APPLICATION")
-        .unwrap_or_default()
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .collect();
-
-    info!("Found {} application IDs", ids.len());
-
-    // Grab application information (Are secrets expired?)
-    // TODO: Create a struct that contains app_id, app_name, secret_expiry_date, is_expired and app_owner_email.
-    // Read the request (json) into the created struct. Get all applications at once.
+    // let apps = get_all_applications_with_owners(&client).await?;
     
-    let mut apps: Vec<App> = Vec::new();
+    let apps = get_all_applications_with_filter(&client).await?;
 
-    // Loop through each application ID and get details
-    for id in ids {
-        let application_response = client.application(&id).get_application().select(&["id", "appId", "displayName", "passwordCredentials"]).send().await?;
-        
-        // Check the application response
-        info!("APPLICATION RESPONSE: {:#?}", application_response);
-        
-        let owner_response = client.application(&id).owners().list_owners().send().await?;
-
-        // Check the owner response
-        info!("OWNERS RESPONSE: {:#?}", owner_response);
-
-        // Deserialize the JSON responses into our structs
-        let owners: Owners = owner_response.json().await?;
-        let mut app: App = application_response.json().await?;
-
-        // Insert owners into the app struct
-        app.insert_owners(owners.value);
-        apps.push(app);
-    }
+    // Then we want to check each application for expiring credentials
+    check_expiring_credentials(&apps)?;
 
     Ok(())
 }
