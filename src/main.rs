@@ -10,38 +10,7 @@ use crate::models::{App, Owners};
 use reqwest::header::HeaderName;
 use reqwest::header::HeaderValue;
 
-pub async fn get_applications_with_owners(
-    client: &GraphClient,
-    ids: Vec<String>,
-) -> anyhow::Result<Vec<App>> {
-    let mut apps: Vec<App> = Vec::new();
-    for id in ids {
-        let application_response = client
-            .application(&id)
-            .get_application()
-            .select(&["id", "appId", "displayName", "passwordCredentials"])
-            .send()
-            .await?;
-
-        let mut application: App = application_response.json().await?;
-
-        let owners_response = client
-            .application(&id)
-            .owners()
-            .list_owners()
-            .select(&["id", "displayName", "mail", "userPrincipalName"])
-            .send()
-            .await?;
-
-        let mut owners: Owners = owners_response.json().await?;
-
-        application.insert_owners(owners.value);
-        apps.push(application);
-    }
-
-    Ok(apps)
-}
-
+// Return a list of applications with passwordCredentials and their owners.
 pub async fn get_all_applications_with_filter(client: &GraphClient) -> anyhow::Result<Vec<App>> {
     let mut apps: Vec<App> = Vec::new();
 
@@ -54,7 +23,6 @@ pub async fn get_all_applications_with_filter(client: &GraphClient) -> anyhow::R
             HeaderName::from_static("consistencylevel"),
             HeaderValue::from_static("eventual"),
         )
-        .filter(&["owners/$count ne 0"])
         .select(&["id", "appId", "displayName", "passwordCredentials"])
         .count("true")
         .paging()
@@ -104,7 +72,8 @@ pub async fn get_all_applications_with_filter(client: &GraphClient) -> anyhow::R
     Ok(apps)
 }
 
-// Return a list of owners and their corresponding expiring credentials.
+// Check for expiring credentials within 30 days and return a list of alerts.
+// Each alert contains the application name, owner emails, and expiring credential info.
 pub async fn check_expiring_credentials(
     apps: &Vec<App>,
 ) -> anyhow::Result<Vec<(String, Vec<String>, Vec<String>)>> {
@@ -125,6 +94,8 @@ pub async fn check_expiring_credentials(
             );
             continue;
         }
+
+
         for credential in &app.passwordCredentials {
             if credential.endDateTime < threshold {
                 info!(
@@ -192,33 +163,29 @@ pub async fn check_expiring_credentials(
     Ok(alerts)
 }
 
+// Send email alert for expiring credentials.
+// The email is sent from ALERTING_EMAIL to RECIEVER_EMAIL with the list of expiring credentials.
 pub async fn send_email_alert(
     client: &GraphClient,
-    app_name: &str,
-    owner_emails: &Vec<String>,
-    expiring_credentials: &Vec<&str>,
+    alerts: Vec<(String, Vec<String>, Vec<String>)>,
 ) -> anyhow::Result<()> {
-
     
     let alerting_email = std::env::var("ALERTING_EMAIL")?;
     let reciever_email = std::env::var("RECIEVER_EMAIL")?;
 
 
-    info!(
-        "Sending email alert for application '{}' to owners: {:?} about expiring credentials: {:?}",
-        app_name, &reciever_email, expiring_credentials
-    );
-
-
     let mail = client.user(&alerting_email)
         .send_mail(&serde_json::json!({
                 "message": {
-                "subject": "Alert: Expiring Credentials for Application",
+                "subject": "Alert: Expiring Credentials for Applications",
                 "body": {
                     "contentType": "Text",
-                    "content": "The application '"
-                        .to_string() + app_name + "' has credentials expiring soon. Please review and take necessary action.\n\nExpiring Credentials:\n"
-                        + &expiring_credentials.join("\n")
+                    "content": format!(
+                        "The following applications have credentials expiring within the next 30 days:\n\nApplication: {}\nOwners: {}\nExpiring Credentials:\n{}\n\nPlease take the necessary actions to renew or replace these credentials.",
+                        alerts.iter().map(|(app_name, _, _)| app_name.as_str()).collect::<Vec<&str>>().join(", "),
+                        alerts.iter().flat_map(|(_, owner_emails, _)| owner_emails.iter()).map(|s| s.as_str()).collect::<Vec<&str>>().join(", "),
+                        alerts.iter().flat_map(|(_, _, creds)| creds.iter()).map(|s| s.as_str()).collect::<Vec<&str>>().join("\n")
+                    )
                 },
                 "toRecipients":[
               {
@@ -235,6 +202,7 @@ pub async fn send_email_alert(
     info!("Email sent with response: {:?}", mail);
 
     Ok(())
+    
 }
 
 pub fn client_secret_credential() -> anyhow::Result<GraphClient> {
@@ -249,33 +217,25 @@ async fn main() -> anyhow::Result<()> {
     // setup logging
     colog::init();
 
-    let app_ids = std::env::var("APPLICATION")?;
-    let app_ids: Vec<String> = app_ids.split(',').map(|s| s.trim().to_string()).collect();
+    // let app_ids = std::env::var("APPLICATION")?;
+    // let app_ids: Vec<String> = app_ids.split(',').map(|s| s.trim().to_string()).collect();
 
     // Initialize Graph client
     let client = client_secret_credential()?;
 
-    // let apps = get_all_applications_with_filter(&client).await?;
-    let apps = get_applications_with_owners(&client, app_ids).await?;
+    let apps = get_all_applications_with_filter(&client).await?;
+    // let apps = get_applications_with_owners(&client, app_ids).await?;
 
     info!("Fetched {:?} applications with owners", apps);
 
     let alerts = check_expiring_credentials(&apps).await?;
 
-    info!("Alerts!: {:?}", alerts);
+    info!("Alerts!: {:?}", &alerts);
 
-    // Send emails to owners of applications with expiring credentials.
-    for (app_name, owner_emails, expiring_credentials) in alerts {
-        if !owner_emails.is_empty() && !expiring_credentials.is_empty() {
-            let expiring_credentials_str: Vec<&str> =
-                expiring_credentials.iter().map(|s| s.as_str()).collect();
-            send_email_alert(&client, &app_name, &owner_emails, &expiring_credentials_str).await?;
-        } else {
-            info!(
-                "No owners or expiring credentials to notify for application '{}'",
-                app_name
-            );
-        }
-    }
+    // Send emails to reciever email with expiring credentials for all applications.
+    let email_response = send_email_alert(&client, alerts).await?;
+    
+
+    
     Ok(())
 }
