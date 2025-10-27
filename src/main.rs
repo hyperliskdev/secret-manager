@@ -173,7 +173,6 @@ pub async fn send_email_alert(
     let alerting_email = std::env::var("ALERTING_EMAIL")?;
     let reciever_email = std::env::var("RECIEVER_EMAIL")?;
 
-
     let mail = client.user(&alerting_email)
         .send_mail(&serde_json::json!({
                 "message": {
@@ -233,9 +232,8 @@ async fn main() -> anyhow::Result<()> {
     info!("Alerts!: {:?}", &alerts);
 
     // Send emails to reciever email with expiring credentials for all applications.
-    let email_response = send_email_alert(&client, alerts).await?;
-    
 
+    let email_response = send_email_alert(&client, alerts).await?;
     
     Ok(())
 }
