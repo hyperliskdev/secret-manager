@@ -1,7 +1,7 @@
 use chrono::DateTime;
 use serde::Deserialize;
 
-#[derive(Deserialize, Debug)] 
+#[derive(Deserialize, Debug)]
 pub struct PasswordCredential {
     pub customKeyIdentifier: Option<String>,
     pub endDateTime: DateTime<chrono::Utc>,
@@ -26,7 +26,7 @@ pub struct User {
 #[derive(Deserialize, Debug)]
 pub struct Owners {
     pub value: Vec<Owner>,
-}
+} 
 
 #[derive(Deserialize, Debug)]
 pub struct Owner {

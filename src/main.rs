@@ -180,10 +180,15 @@ pub async fn send_email_alert(
                 "body": {
                     "contentType": "Text",
                     "content": format!(
-                        "The following applications have credentials expiring within the next 30 days:\n\nApplication: {}\nOwners: {}\nExpiring Credentials:\n{}\n\nPlease take the necessary actions to renew or replace these credentials.",
-                        alerts.iter().map(|(app_name, _, _)| app_name.as_str()).collect::<Vec<&str>>().join(", "),
-                        alerts.iter().flat_map(|(_, owner_emails, _)| owner_emails.iter()).map(|s| s.as_str()).collect::<Vec<&str>>().join(", "),
-                        alerts.iter().flat_map(|(_, _, creds)| creds.iter()).map(|s| s.as_str()).collect::<Vec<&str>>().join("\n")
+                        "The following applications have credentials expiring within the next 30 days: \n\n {}",
+                        alerts.iter().map(|(app_name, owners, creds)| {
+                            format!("Application: {}\nOwners: {}\nExpiring Credentials:\n{}\n", 
+                                app_name, 
+                                owners.iter().map(|s| s.as_str()).collect::<Vec<&str>>().join(", "), 
+                                creds.iter().map(|s| s.as_str()).collect::<Vec<&str>>().join("\n")
+                            )
+                        })
+                        .collect::<Vec<String>>().join("\n")
                     )
                 },
                 "toRecipients":[
